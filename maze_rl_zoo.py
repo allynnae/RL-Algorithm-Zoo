@@ -61,6 +61,8 @@ def main() -> None:
     recent_states = deque(maxlen=10)
     log_probs: list = []
     rewards: list = []
+    q_td_errors: list = []
+    a2c_losses: list = []
     episodes_done = 0
     episode_active = False
     state = env.reset()
@@ -68,6 +70,7 @@ def main() -> None:
     wandb_run = None
     clock = env.clock
     running_loop = True
+    global_step = 0
 
     while running_loop:
         for event in env.poll_events():
@@ -145,12 +148,15 @@ def main() -> None:
                 ui_state.step = 0
                 ui_state.reward = 0.0
                 episode_active = True
+                q_td_errors = []
+                a2c_losses = []
 
             key = ALGORITHMS[ui_state.algo_idx][0]
             if key == "qlearning":
                 action = agent.select_action(state)
                 next_state, reward, done, _ = env.step(action)
-                agent.update(state, action, reward, next_state, done)
+                td = agent.update(state, action, reward, next_state, done)
+                q_td_errors.append(abs(td))
                 state = next_state
             elif key == "reinforce":
                 action, log_p = agent.select_action(to_tensor(state))
@@ -162,7 +168,8 @@ def main() -> None:
                 action, log_prob, value = agent.select_action(to_tensor(state))
                 next_state, reward, done, _ = env.step(action)
                 next_value = agent.value(to_tensor(next_state).unsqueeze(0)).detach()
-                agent.update(log_prob, value, reward, next_value, done)
+                loss = agent.update(log_prob, value, reward, next_value, done)
+                a2c_losses.append(loss)
                 state = next_state
             else:
                 action = agent.select_action(recent_states)
@@ -173,22 +180,63 @@ def main() -> None:
 
             ui_state.step += 1
             ui_state.reward += reward
+            global_step += 1
 
             if done or env.steps >= env.max_steps:
                 episodes_done += 1
                 episode_active = False
+                ep_len = ui_state.step
+                ep_rew = ui_state.reward
                 if wandb_run:
                     if key == "reinforce":
                         loss = agent.update_policy(log_probs, rewards)
                         log_probs, rewards = [], []
-                        wandb.log({"episode": episodes_done, "reward": ui_state.reward, "loss": loss, "algo": key})
+                        wandb.log(
+                            {
+                                "episode": episodes_done,
+                                "rollout/ep_rew_mean": ep_rew,
+                                "rollout/ep_len_mean": ep_len,
+                                "train/loss": loss,
+                                "algo": key,
+                                "global_step": global_step,
+                            }
+                        )
                     elif key == "a2c":
-                        wandb.log({"episode": episodes_done, "reward": ui_state.reward, "algo": key})
+                        mean_loss = sum(a2c_losses) / len(a2c_losses) if a2c_losses else 0.0
+                        wandb.log(
+                            {
+                                "episode": episodes_done,
+                                "rollout/ep_rew_mean": ep_rew,
+                                "rollout/ep_len_mean": ep_len,
+                                "train/loss": mean_loss,
+                                "algo": key,
+                                "global_step": global_step,
+                            }
+                        )
                     elif key == "qlearning":
-                        wandb.log({"episode": episodes_done, "reward": ui_state.reward, "algo": key})
+                        mean_td = sum(q_td_errors) / len(q_td_errors) if q_td_errors else 0.0
+                        wandb.log(
+                            {
+                                "episode": episodes_done,
+                                "rollout/ep_rew_mean": ep_rew,
+                                "rollout/ep_len_mean": ep_len,
+                                "train/loss": mean_td,
+                                "algo": key,
+                                "global_step": global_step,
+                            }
+                        )
                     else:
                         train_loss = agent.train_step(batch_size=32)
-                        wandb.log({"episode": episodes_done, "reward": ui_state.reward, "loss": train_loss, "algo": key})
+                        wandb.log(
+                            {
+                                "episode": episodes_done,
+                                "rollout/ep_rew_mean": ep_rew,
+                                "rollout/ep_len_mean": ep_len,
+                                "train/loss": train_loss,
+                                "algo": key,
+                                "global_step": global_step,
+                            }
+                        )
                 ui_state.step = 0
                 ui_state.reward = 0.0
 
