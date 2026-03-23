@@ -254,7 +254,7 @@ class MazeEnv:
 
         cursor_y += 48
         text("Speed", x0 + 14, cursor_y, size=12, bold=True, color=(140, 150, 165))
-        text(f"{ui.speed_ms} ms", x0 + self.sidebar_width - 90, cursor_y, size=12, bold=True)
+        text(f"{ui.speed_ms} ms", x0 + self.sidebar_width - 60, cursor_y, size=12, bold=True)
         cursor_y += 18
         speed_track = pygame.Rect(x0 + 14, cursor_y + 10, self.sidebar_width - 32, 6)
         pygame.draw.rect(self.surface, self.colors["panel_border"], speed_track, border_radius=4)
