@@ -1,6 +1,6 @@
 # RL Algorithm Zoo (Maze)
 
-Run four RL algorithms on a small maze with an integrated GUI:
+Run and compare four RL algorithms on a small maze with an integrated GUI:
 - Q-Learning (value-based)
 - REINFORCE (policy gradient)
 - A2C (hybrid actor-critic)
