@@ -11,4 +11,4 @@ Quick start:
 pip install -r requirements.txt
 python maze_rl_zoo.py
 ```
-<img width="716" height="623" alt="image" src="https://github.com/user-attachments/assets/9413dcb2-9890-4078-8d6f-3197d7af9035" />
+<img width="705" height="589" alt="image" src="https://github.com/user-attachments/assets/3c3b5202-b89b-44f2-8da1-298de9976ddb" />
