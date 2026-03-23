@@ -1,0 +1,11 @@
+# Bytecode / cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+
+# Weights & Biases local runs
+wandb/
