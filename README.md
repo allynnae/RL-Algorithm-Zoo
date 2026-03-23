@@ -4,7 +4,7 @@ Run and compare four RL algorithms on a small maze with an integrated GUI:
 - Q-Learning (value-based)
 - REINFORCE (policy gradient)
 - A2C (hybrid actor-critic)
-- Decision Transformer (sequence model)
+- DQN (value-based with neural Q-function and replay buffer)
 
 Quick start:
 ```

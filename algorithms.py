@@ -1,8 +1,7 @@
 """
-Algorithm implementations: Q-Learning, REINFORCE, A2C, Decision Transformer, plus shared helpers.
+Algorithm implementations: Q-Learning, REINFORCE, A2C, and DQN, plus shared helpers.
 """
 
-import math
 import random
 from collections import deque, namedtuple
 
@@ -11,9 +10,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-# Shared transition tuple
+# Shared transition tuple for replay-style buffers.
 Transition = namedtuple("Transition", ["state", "action", "reward", "next_state", "done"])
-
 
 # Convert numpy state vector to a torch tensor.
 def to_tensor(state: np.ndarray) -> torch.Tensor:
@@ -136,96 +134,109 @@ class A2CAgent:
         return float(loss.item())
 
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model: int, max_len: int = 50) -> None:
+# ----- DQN components -----
+class QNetwork(nn.Module):
+    def __init__(self, input_dim: int, num_actions: int) -> None:
         super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer("pe", pe.unsqueeze(0))
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, num_actions),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.pe[:, : x.size(1)]
+        return self.net(x)
 
 
-class DecisionTransformer(nn.Module):
-    def __init__(self, state_dim: int, num_actions: int = 4, d_model: int = 64, nhead: int = 4, seq_len: int = 10) -> None:
-        super().__init__()
-        self.state_embed = nn.Linear(state_dim, d_model)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=128, batch_first=True)
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
-        self.pos_encoding = PositionalEncoding(d_model, max_len=seq_len)
-        self.action_head = nn.Linear(d_model, num_actions)
-        self.seq_len = seq_len
+class DQNAgent:
+    def __init__(
+        self,
+        state_dim: int,
+        num_actions: int = 4,
+        lr: float = 1e-3,
+        gamma: float = 0.99,
+        buffer_size: int = 20000,
+        batch_size: int = 64,
+        epsilon_start: float = 1.0,
+        epsilon_end: float = 0.1,
+        epsilon_decay: float = 0.999,  # slower decay to keep early exploration
+        target_update: int = 50,
+        warmup_min: int = 200,
+    ) -> None:
+        self.num_actions = num_actions
+        self.gamma = gamma
+        self.batch_size = batch_size
+        self.epsilon = epsilon_start
+        self.epsilon_end = epsilon_end
+        self.epsilon_decay = epsilon_decay
+        self.target_update = target_update
+        self.steps_done = 0
+        self.warmup_min = warmup_min
 
-    def forward(self, states: torch.Tensor) -> torch.Tensor:
-        x = self.state_embed(states)
-        x = self.pos_encoding(x)
-        encoded = self.transformer(x)
-        last_token = encoded[:, -1, :]
-        return self.action_head(last_token)
+        self.q_net = QNetwork(state_dim, num_actions)
+        self.target_net = QNetwork(state_dim, num_actions)
+        self.target_net.load_state_dict(self.q_net.state_dict())
+        self.target_net.eval()
 
+        self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
+        self.loss_fn = nn.MSELoss()
+        self.buffer: deque[Transition] = deque(maxlen=buffer_size)
 
-class DecisionTransformerAgent:
-    def __init__(self, state_dim: int, num_actions: int = 4, seq_len: int = 10, lr: float = 1e-3) -> None:
-        self.seq_len = seq_len
-        self.model = DecisionTransformer(state_dim, num_actions, seq_len=seq_len)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
-        self.loss_fn = nn.CrossEntropyLoss()
-        self.buffer: deque[Transition] = deque(maxlen=5000)
+    def select_action(self, state: torch.Tensor) -> int:
+        # Epsilon-greedy over Q-network predictions.
+        if random.random() < self.epsilon:
+            action = random.randrange(self.num_actions)
+        else:
+            with torch.no_grad():
+                q_vals = self.q_net(state.unsqueeze(0))
+                action = int(torch.argmax(q_vals, dim=1).item())
+        # Decay epsilon after each decision.
+        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
+        self.steps_done += 1
+        return action
 
     def store(self, transition: Transition) -> None:
         self.buffer.append(transition)
 
-    def sample_batch(self, batch_size: int = 32) -> tuple[torch.Tensor, torch.Tensor]:
-        if len(self.buffer) < self.seq_len:
-            return None, None
-        sequences_states = []
-        sequences_actions = []
-        for _ in range(batch_size):
-            start = random.randint(0, len(self.buffer) - self.seq_len)
-            seq = list(self.buffer)[start : start + self.seq_len]
-            state_stack = [to_tensor(tr.state) for tr in seq]
-            action_target = seq[-1].action
-            sequences_states.append(torch.stack(state_stack))
-            sequences_actions.append(action_target)
-        states_tensor = torch.stack(sequences_states)
-        actions_tensor = torch.tensor(sequences_actions, dtype=torch.long)
-        return states_tensor, actions_tensor
-
-    def train_step(self, batch_size: int = 32) -> float:
-        states, actions = self.sample_batch(batch_size)
-        if states is None:
+# Prefill the replay buffer with random experience to avoid a cold start.
+def warmup_replay(env, agent: DQNAgent, steps: int = 500) -> None:
+    render_prev = env.render_enabled
+    env.render_enabled = False
+    state = env.reset()
+    for _ in range(steps):
+        action = random.randrange(agent.num_actions)
+        next_state, reward, done, _ = env.step(action)
+        agent.store(Transition(state, action, reward, next_state, done))
+        state = env.reset() if done else next_state
+    env.render_enabled = render_prev
+    def train_step(self) -> float:
+        # Need enough samples to form a batch.
+        if len(self.buffer) < max(self.batch_size, self.warmup_min):
             return 0.0
-        logits = self.model(states)
-        loss = self.loss_fn(logits, actions)
+
+        batch = random.sample(self.buffer, self.batch_size)
+        states = torch.stack([to_tensor(tr.state) for tr in batch])
+        actions = torch.tensor([tr.action for tr in batch], dtype=torch.long)
+        rewards = torch.tensor([tr.reward for tr in batch], dtype=torch.float32)
+        next_states = torch.stack([to_tensor(tr.next_state) for tr in batch])
+        dones = torch.tensor([tr.done for tr in batch], dtype=torch.float32)
+
+        # Current Q estimates for taken actions.
+        q_values = self.q_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+        # Target Q using the frozen target network.
+        with torch.no_grad():
+            next_q = self.target_net(next_states).max(1)[0]
+            target = rewards + self.gamma * (1.0 - dones) * next_q
+
+        loss = self.loss_fn(q_values, target)
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
+
+        # Periodically sync target network for stability.
+        if self.steps_done % self.target_update == 0:
+            self.target_net.load_state_dict(self.q_net.state_dict())
+
         return float(loss.item())
-
-    def select_action(self, recent_states: deque) -> int:
-        if len(recent_states) < self.seq_len:
-            return random.randrange(4)
-        state_window = list(recent_states)[-self.seq_len :]
-        state_tensor = torch.stack([to_tensor(s) for s in state_window]).unsqueeze(0)
-        logits = self.model(state_tensor)
-        action = torch.argmax(logits, dim=1)
-        return int(action.item())
-
-
-# Fill the replay buffer with random episodes before DT training.
-def warmup_buffer(env, agent: DecisionTransformerAgent, episodes: int = 50) -> None:
-    original_render = env.render_enabled
-    env.render_enabled = False
-    for _ in range(episodes):
-        state = env.reset()
-        done = False
-        while not done:
-            action = random.randrange(4)
-            next_state, reward, done, _ = env.step(action)
-            agent.store(Transition(state, action, reward, next_state, done))
-            state = next_state
-    env.render_enabled = original_render

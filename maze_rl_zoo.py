@@ -1,23 +1,21 @@
 """
-Main runner: wires the pygame UI to the four RL algorithms and Weights & Biases logging.
+Main runner: wires the pygame UI to the RL algorithms (including DQN) and Weights & Biases logging.
 """
 
 import argparse
 import os
 import random
-import time
-from collections import deque
 
 import wandb
 
 from algorithms import (
     A2CAgent,
-    DecisionTransformerAgent,
+    DQNAgent,
     QLearningAgent,
     ReinforceAgent,
+    warmup_replay,
     Transition,
     to_tensor,
-    warmup_buffer,
 )
 from ui import ALGORITHMS, MazeEnv, UIState
 from wandb_utils import start_wandb_run
@@ -58,15 +56,14 @@ def main() -> None:
     env.ui_state = ui_state
 
     agent = None
-    recent_states = deque(maxlen=10)
     log_probs: list = []
     rewards: list = []
     q_td_errors: list = []
     a2c_losses: list = []
+    dqn_losses: list = []
     episodes_done = 0
     episode_active = False
     state = env.reset()
-    recent_states.append(state)
     wandb_run = None
     clock = env.clock
     running_loop = True
@@ -106,10 +103,13 @@ def main() -> None:
                                 log_probs, rewards = [], []
                             elif key == "a2c":
                                 agent = A2CAgent(state_dim)
+                            elif key == "dqn":
+                                agent = DQNAgent(state_dim)
+                                dqn_losses = []
+                                # Prefill replay so early training has signal.
+                                warmup_replay(env, agent, steps=800)
                             else:
-                                agent = DecisionTransformerAgent(state_dim)
-                                recent_states = deque(maxlen=agent.seq_len)
-                                warmup_buffer(env, agent, episodes=20)
+                                raise ValueError(f"Unknown algorithm key: {key}")
                             episode_active = False
                         else:
                             ui_state.running = False
@@ -142,14 +142,14 @@ def main() -> None:
                     env.render()
                     continue
                 state = env.reset()
-                recent_states = deque(maxlen=10)
-                recent_states.append(state)
+                key = ALGORITHMS[ui_state.algo_idx][0]
                 ui_state.episode = episodes_done + 1
                 ui_state.step = 0
                 ui_state.reward = 0.0
                 episode_active = True
                 q_td_errors = []
                 a2c_losses = []
+                dqn_losses = []
 
             key = ALGORITHMS[ui_state.algo_idx][0]
             if key == "qlearning":
@@ -171,12 +171,16 @@ def main() -> None:
                 loss = agent.update(log_prob, value, reward, next_value, done)
                 a2c_losses.append(loss)
                 state = next_state
-            else:
-                action = agent.select_action(recent_states)
+            elif key == "dqn":
+                action = agent.select_action(to_tensor(state))
                 next_state, reward, done, _ = env.step(action)
                 agent.store(Transition(state, action, reward, next_state, done))
-                recent_states.append(next_state)
+                loss = agent.train_step()
+                if loss:
+                    dqn_losses.append(loss)
                 state = next_state
+            else:
+                raise ValueError(f"Unknown algorithm key: {key}")
 
             ui_state.step += 1
             ui_state.reward += reward
@@ -225,14 +229,14 @@ def main() -> None:
                                 "global_step": global_step,
                             }
                         )
-                    else:
-                        train_loss = agent.train_step(batch_size=32)
+                    elif key == "dqn":
+                        mean_loss = sum(dqn_losses) / len(dqn_losses) if dqn_losses else 0.0
                         wandb.log(
                             {
                                 "episode": episodes_done,
                                 "rollout/ep_rew_mean": ep_rew,
                                 "rollout/ep_len_mean": ep_len,
-                                "train/loss": train_loss,
+                                "train/loss": mean_loss,
                                 "algo": key,
                                 "global_step": global_step,
                             }

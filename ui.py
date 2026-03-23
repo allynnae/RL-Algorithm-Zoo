@@ -15,7 +15,7 @@ ALGORITHMS = [
     ("qlearning", "Q-Learning", "Value-Based"),
     ("reinforce", "REINFORCE", "Policy Gradient"),
     ("a2c", "A2C", "Actor-Critic"),
-    ("decision_transformer", "Decision Transformer", "Sequence Model"),
+    ("dqn", "DQN", "Value-Based (NN)"),
 ]
 
 
